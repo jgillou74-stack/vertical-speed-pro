@@ -3,17 +3,16 @@ import { AthleteData, StravaActivity, RecentActivity, StravaTokens } from '../ty
 
 /**
  * Strava Service - Moteur Haute Performance
- * Gère l'authentification OAuth 2.0 et l'analyse biomécanique des activités.
+ * Gère l'authentification OAuth 2.0 native et l'analyse des performances.
  */
 export class StravaService {
   private static instance: StravaService;
   
-  // Configuration officielle
+  // Identifiant client fixe
   private CLIENT_ID = "200772"; 
   
-  // Note: En production, le secret doit être géré par un proxy backend.
-  // Pour cette implémentation directe, il est requis pour l'échange initial.
-  private CLIENT_SECRET = "VOTRE_CLIENT_SECRET_ICI"; 
+  // Récupération sécurisée du secret via les variables d'environnement Vercel
+  private CLIENT_SECRET = process.env.STRAVA_CLIENT_SECRET || ""; 
 
   private tokens: StravaTokens | null = null;
 
@@ -36,15 +35,14 @@ export class StravaService {
   }
 
   /**
-   * Retourne l'origine actuelle pour la redirection OAuth
+   * Génère dynamiquement l'URL de redirection basée sur l'origine actuelle
    */
   private getRedirectUri(): string {
-    // Utilise l'origine actuelle (ex: https://verticalspeed... ou http://localhost:3000)
     return window.location.origin;
   }
 
   /**
-   * Redirection vers Strava avec redirect_uri dynamique
+   * Redirection vers Strava avec les paramètres corrigés
    */
   public initiateAuth() {
     const scope = "activity:read_all,profile:read_all";
@@ -54,19 +52,23 @@ export class StravaService {
   }
 
   /**
-   * Échange le code d'autorisation contre le pack de jetons (access + refresh)
+   * Échange le code temporaire contre des jetons d'accès et de rafraîchissement
    */
   public async handleCallback(code: string): Promise<void> {
+    if (!this.CLIENT_SECRET) {
+      throw new Error("STRAVA_CLIENT_SECRET n'est pas configuré dans l'environnement.");
+    }
+
     try {
       const response = await fetch('https://www.strava.com/oauth/token', {
-        // Note: Strava exige l'envoi des paramètres en POST
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           client_id: this.CLIENT_ID,
           client_secret: this.CLIENT_SECRET,
           code: code,
-          grant_type: 'authorization_code'
+          grant_type: 'authorization_code',
+          redirect_uri: this.getRedirectUri() // Requis par Strava pour valider l'échange
         })
       });
 
@@ -88,17 +90,18 @@ export class StravaService {
   }
 
   /**
-   * Assure la validité du jeton avant chaque appel API (Auto-refresh)
+   * Rafraîchissement automatique du token dès expiration
    */
   private async ensureValidToken(): Promise<string> {
-    if (!this.tokens) throw new Error("Authentification Strava manquante");
+    if (!this.tokens) throw new Error("Authentification Strava requise");
 
     const now = Math.floor(Date.now() / 1000);
+    // On anticipe de 10 minutes l'expiration
     if (this.tokens.expires_at > now + 600) {
       return this.tokens.access_token;
     }
 
-    console.log("Token expiré. Tentative de rafraîchissement...");
+    console.log("Rafraîchissement du jeton Strava en cours...");
     try {
       const response = await fetch('https://www.strava.com/oauth/token', {
         method: 'POST',
@@ -111,7 +114,7 @@ export class StravaService {
         })
       });
 
-      if (!response.ok) throw new Error("Rafraîchissement impossible");
+      if (!response.ok) throw new Error("Impossible de rafraîchir le jeton");
 
       const data = await response.json();
       this.saveTokens({
@@ -122,7 +125,7 @@ export class StravaService {
       return data.access_token;
     } catch (error) {
       this.logout();
-      throw new Error("Votre session Strava a expiré. Reconnexion nécessaire.");
+      throw new Error("Votre session Strava a expiré. Veuillez vous reconnecter.");
     }
   }
 
@@ -140,15 +143,22 @@ export class StravaService {
     return !!this.tokens;
   }
 
+  /**
+   * Calcul de la Vitesse Verticale : (Gain Altitude / Temps) * 3600
+   */
   private calculateVam(elevation: number, timeInSeconds: number): number {
-    if (timeInSeconds === 0) return 0;
+    if (timeInSeconds <= 0) return 0;
     return Math.round((elevation / timeInSeconds) * 3600);
   }
 
   private estimateVo2Max(vam: number): number {
+    // Corrélation VAM / VO2 Max selon les standards endurance
     return Math.round(vam / 14.2);
   }
 
+  /**
+   * Récupère et analyse les activités Strava récentes
+   */
   async fetchAthleteData(): Promise<AthleteData> {
     const token = await this.ensureValidToken();
 
@@ -157,20 +167,20 @@ export class StravaService {
         fetch('https://www.strava.com/api/v3/athlete', {
           headers: { 'Authorization': `Bearer ${token}` }
         }),
-        fetch('https://www.strava.com/api/v3/athlete/activities?per_page=20', {
+        fetch('https://www.strava.com/api/v3/athlete/activities?per_page=15', {
           headers: { 'Authorization': `Bearer ${token}` }
         })
       ]);
 
       if (!athleteRes.ok || !activitiesRes.ok) {
-        throw new Error("Erreur de communication avec Strava");
+        throw new Error("Erreur d'accès aux données Strava");
       }
 
       const athlete = await athleteRes.json();
       const activities: StravaActivity[] = await activitiesRes.json();
       
       const verticalActivities = activities
-        .filter(a => a.total_elevation_gain > 50 && a.moving_time > 60)
+        .filter(a => a.total_elevation_gain > 30 && a.moving_time > 60)
         .map(a => ({
           name: a.name,
           elevation: Math.round(a.total_elevation_gain),
@@ -181,14 +191,14 @@ export class StravaService {
       if (verticalActivities.length === 0) {
         return {
           weight: athlete.weight || 68.0,
-          vo2max: 50,
-          vam4min: 600,
-          sourceActivity: "Aucun dénivelé significatif détecté",
+          vo2max: 52,
+          vam4min: 700,
+          sourceActivity: "Analyse basée sur profil (aucune activité verticale détectée)",
           recentActivities: []
         };
       }
 
-      const recent = verticalActivities.slice(0, 2);
+      const recent = verticalActivities.slice(0, 3);
       const bestVam = Math.max(...verticalActivities.map(v => v.vam));
       
       return {
@@ -199,7 +209,7 @@ export class StravaService {
         recentActivities: recent
       };
     } catch (error: any) {
-      console.error("Fetch Error:", error);
+      console.error("Strava Data Error:", error);
       throw error;
     }
   }
