@@ -11,8 +11,8 @@ export class StravaService {
   // Identifiant client fixe
   private CLIENT_ID = "200772"; 
   
-  // Récupération sécurisée du secret via les variables d'environnement Vercel
-  private CLIENT_SECRET = process.env.STRAVA_CLIENT_SECRET || ""; 
+  // Récupération sécurisée du secret via import.meta.env avec optional chaining pour éviter les crashs
+  private CLIENT_SECRET = (import.meta as any).env?.VITE_STRAVA_CLIENT_SECRET || "";
 
   private tokens: StravaTokens | null = null;
 
@@ -35,7 +35,7 @@ export class StravaService {
   }
 
   /**
-   * Génère dynamiquement l'URL de redirection basée sur l'origine actuelle
+   * Génère dynamiquement l'URL de redirection basée sur l'origine actuelle (window.location.origin)
    */
   private getRedirectUri(): string {
     return window.location.origin;
@@ -52,29 +52,33 @@ export class StravaService {
   }
 
   /**
-   * Échange le code temporaire contre des jetons d'accès et de rafraîchissement
+   * Échange le code temporaire contre des jetons d'accès et de rafraîchissement.
+   * Utilise EXCLUSIVEMENT URLSearchParams pour le corps de la requête.
    */
   public async handleCallback(code: string): Promise<void> {
     if (!this.CLIENT_SECRET) {
-      throw new Error("STRAVA_CLIENT_SECRET n'est pas configuré dans l'environnement.");
+      throw new Error("VITE_STRAVA_CLIENT_SECRET n'est pas configuré. Vérifiez vos variables d'environnement.");
     }
 
     try {
+      const params = new URLSearchParams();
+      params.append('client_id', this.CLIENT_ID);
+      params.append('client_secret', this.CLIENT_SECRET);
+      params.append('code', code);
+      params.append('grant_type', 'authorization_code');
+      params.append('redirect_uri', this.getRedirectUri());
+
       const response = await fetch('https://www.strava.com/oauth/token', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          client_id: this.CLIENT_ID,
-          client_secret: this.CLIENT_SECRET,
-          code: code,
-          grant_type: 'authorization_code',
-          redirect_uri: this.getRedirectUri() // Requis par Strava pour valider l'échange
-        })
+        headers: {
+          'Accept': 'application/json'
+        },
+        body: params
       });
 
       if (!response.ok) {
         const errorBody = await response.json();
-        throw new Error(errorBody.message || "Échec de l'échange OAuth");
+        throw new Error(errorBody.message || "Échec de l'échange OAuth avec Strava");
       }
       
       const data = await response.json();
@@ -90,7 +94,8 @@ export class StravaService {
   }
 
   /**
-   * Rafraîchissement automatique du token dès expiration
+   * Rafraîchissement automatique du token dès expiration.
+   * Utilise EXCLUSIVEMENT URLSearchParams pour le corps de la requête.
    */
   private async ensureValidToken(): Promise<string> {
     if (!this.tokens) throw new Error("Authentification Strava requise");
@@ -101,20 +106,23 @@ export class StravaService {
       return this.tokens.access_token;
     }
 
-    console.log("Rafraîchissement du jeton Strava en cours...");
+    console.log("Rafraîchissement du jeton Strava via URLSearchParams...");
     try {
+      const params = new URLSearchParams();
+      params.append('client_id', this.CLIENT_ID);
+      params.append('client_secret', this.CLIENT_SECRET);
+      params.append('refresh_token', this.tokens.refresh_token);
+      params.append('grant_type', 'refresh_token');
+
       const response = await fetch('https://www.strava.com/oauth/token', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          client_id: this.CLIENT_ID,
-          client_secret: this.CLIENT_SECRET,
-          refresh_token: this.tokens.refresh_token,
-          grant_type: 'refresh_token'
-        })
+        headers: {
+          'Accept': 'application/json'
+        },
+        body: params
       });
 
-      if (!response.ok) throw new Error("Impossible de rafraîchir le jeton");
+      if (!response.ok) throw new Error("Impossible de rafraîchir le jeton (Bad Request)");
 
       const data = await response.json();
       this.saveTokens({
@@ -152,7 +160,6 @@ export class StravaService {
   }
 
   private estimateVo2Max(vam: number): number {
-    // Corrélation VAM / VO2 Max selon les standards endurance
     return Math.round(vam / 14.2);
   }
 
@@ -173,7 +180,7 @@ export class StravaService {
       ]);
 
       if (!athleteRes.ok || !activitiesRes.ok) {
-        throw new Error("Erreur d'accès aux données Strava");
+        throw new Error("Erreur d'accès aux données Strava (API)");
       }
 
       const athlete = await athleteRes.json();
