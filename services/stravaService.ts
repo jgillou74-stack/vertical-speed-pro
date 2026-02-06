@@ -8,9 +8,8 @@ import { AthleteData, StravaActivity, RecentActivity, StravaTokens } from '../ty
 export class StravaService {
   private static instance: StravaService;
   
-  // Configuration officielle fournie
+  // Configuration officielle
   private CLIENT_ID = "200772"; 
-  private REDIRECT_URI = "https://verticalspeed-pro-coach-kilian.vercel.app";
   
   // Note: En production, le secret doit être géré par un proxy backend.
   // Pour cette implémentation directe, il est requis pour l'échange initial.
@@ -37,11 +36,20 @@ export class StravaService {
   }
 
   /**
-   * Redirection vers Strava avec les scopes exacts demandés
+   * Retourne l'origine actuelle pour la redirection OAuth
+   */
+  private getRedirectUri(): string {
+    // Utilise l'origine actuelle (ex: https://verticalspeed... ou http://localhost:3000)
+    return window.location.origin;
+  }
+
+  /**
+   * Redirection vers Strava avec redirect_uri dynamique
    */
   public initiateAuth() {
     const scope = "activity:read_all,profile:read_all";
-    const authUrl = `https://www.strava.com/oauth/authorize?client_id=${this.CLIENT_ID}&redirect_uri=${encodeURIComponent(this.REDIRECT_URI)}&response_type=code&scope=${scope}`;
+    const redirectUri = this.getRedirectUri();
+    const authUrl = `https://www.strava.com/oauth/authorize?client_id=${this.CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${scope}`;
     window.location.href = authUrl;
   }
 
@@ -51,6 +59,7 @@ export class StravaService {
   public async handleCallback(code: string): Promise<void> {
     try {
       const response = await fetch('https://www.strava.com/oauth/token', {
+        // Note: Strava exige l'envoi des paramètres en POST
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -85,7 +94,6 @@ export class StravaService {
     if (!this.tokens) throw new Error("Authentification Strava manquante");
 
     const now = Math.floor(Date.now() / 1000);
-    // On rafraîchit si le token expire dans moins de 10 minutes
     if (this.tokens.expires_at > now + 600) {
       return this.tokens.access_token;
     }
@@ -132,22 +140,15 @@ export class StravaService {
     return !!this.tokens;
   }
 
-  /**
-   * Calcule la VAM (Vertical Speed) : (D+ / temps en secondes) * 3600
-   */
   private calculateVam(elevation: number, timeInSeconds: number): number {
     if (timeInSeconds === 0) return 0;
     return Math.round((elevation / timeInSeconds) * 3600);
   }
 
   private estimateVo2Max(vam: number): number {
-    // Standard Kilian Jornet / Endurance : VO2 Max ~ VAM / 14.2 (moyenne terrain technique)
     return Math.round(vam / 14.2);
   }
 
-  /**
-   * Analyse les activités Strava et extrait les données de performance
-   */
   async fetchAthleteData(): Promise<AthleteData> {
     const token = await this.ensureValidToken();
 
@@ -168,7 +169,6 @@ export class StravaService {
       const athlete = await athleteRes.json();
       const activities: StravaActivity[] = await activitiesRes.json();
       
-      // Filtrage intelligent : Sorties de plus de 50m de D+ uniquement
       const verticalActivities = activities
         .filter(a => a.total_elevation_gain > 50 && a.moving_time > 60)
         .map(a => ({
@@ -178,7 +178,6 @@ export class StravaService {
           vam: this.calculateVam(a.total_elevation_gain, a.moving_time)
         }));
 
-      // Si aucune activité montagneuse n'est trouvée
       if (verticalActivities.length === 0) {
         return {
           weight: athlete.weight || 68.0,
@@ -189,7 +188,6 @@ export class StravaService {
         };
       }
 
-      // Analyse de la performance maximale (VAM 4min extrapolée ou meilleure VAM détectée)
       const recent = verticalActivities.slice(0, 2);
       const bestVam = Math.max(...verticalActivities.map(v => v.vam));
       
