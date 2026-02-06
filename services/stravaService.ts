@@ -2,15 +2,19 @@
 import { AthleteData, StravaActivity, RecentActivity, StravaTokens } from '../types';
 
 /**
- * Strava Service - Flux OAuth 2.0 Complet
+ * Strava Service - Implémentation Native OAuth 2.0
+ * Utilise le flux officiel pour récupérer les activités et calculer la VAM.
  */
 export class StravaService {
   private static instance: StravaService;
   
-  // À REMPLACER PAR VOS INFOS STRAVA API
-  private CLIENT_ID = "YOUR_CLIENT_ID"; 
-  private CLIENT_SECRET = "YOUR_CLIENT_SECRET";
-  private REDIRECT_URI = window.location.origin;
+  // Paramètres fournis par l'utilisateur
+  private CLIENT_ID = "200772"; 
+  private REDIRECT_URI = "https://verticalspeed-pro-coach-kilian.vercel.app";
+  
+  // NOTE: Le client_secret est nécessaire pour l'échange de code -> token.
+  // Dans une app de production, cet échange devrait se faire côté serveur pour la sécurité.
+  private CLIENT_SECRET = "VOTRE_CLIENT_SECRET_ICI"; 
 
   private tokens: StravaTokens | null = null;
 
@@ -29,16 +33,16 @@ export class StravaService {
   }
 
   /**
-   * Redirige l'utilisateur vers Strava pour autorisation
+   * Redirige vers la page d'autorisation Strava avec les scopes requis
    */
   public initiateAuth() {
-    const scope = "read,profile:read_all,activity:read_all";
+    const scope = "activity:read_all,profile:read_all";
     const authUrl = `https://www.strava.com/oauth/authorize?client_id=${this.CLIENT_ID}&redirect_uri=${this.REDIRECT_URI}&response_type=code&scope=${scope}`;
     window.location.href = authUrl;
   }
 
   /**
-   * Échange le code d'autorisation contre des jetons
+   * Échange le code d'autorisation contre un access_token et un refresh_token
    */
   public async handleCallback(code: string): Promise<void> {
     try {
@@ -53,7 +57,10 @@ export class StravaService {
         })
       });
 
-      if (!response.ok) throw new Error("Échec de l'échange de token");
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.message || "Échec de l'échange de token");
+      }
       
       const data = await response.json();
       this.saveTokens({
@@ -68,17 +75,18 @@ export class StravaService {
   }
 
   /**
-   * Rafraîchit le token s'il est expiré
+   * Vérifie la validité du token et rafraîchit si nécessaire
    */
   private async ensureValidToken(): Promise<string> {
-    if (!this.tokens) throw new Error("Non authentifié");
+    if (!this.tokens) throw new Error("Veuillez vous connecter à Strava");
 
     const now = Math.floor(Date.now() / 1000);
-    if (this.tokens.expires_at > now + 300) { // 5 min de marge
+    // Rafraîchir si expiré ou expire dans moins de 5 minutes
+    if (this.tokens.expires_at > now + 300) {
       return this.tokens.access_token;
     }
 
-    console.log("Rafraîchissement du token Strava...");
+    console.log("Rafraîchissement automatique du token Strava...");
     try {
       const response = await fetch('https://www.strava.com/oauth/token', {
         method: 'POST',
@@ -102,7 +110,7 @@ export class StravaService {
       return data.access_token;
     } catch (error) {
       this.logout();
-      throw new Error("Session Strava expirée. Veuillez vous reconnecter.");
+      throw new Error("Session Strava expirée. Reconnexion requise.");
     }
   }
 
@@ -121,11 +129,12 @@ export class StravaService {
   }
 
   private estimateVo2Max(vam: number): number {
+    // Formule empirique : VO2 Max ~ VAM / 14.5 pour les coureurs de montagne
     return Math.round(vam / 14.5);
   }
 
   /**
-   * Récupère les données athlète avec validation automatique du token
+   * Récupère les activités et calcule les métriques de performance
    */
   async fetchAthleteData(): Promise<AthleteData> {
     const token = await this.ensureValidToken();
@@ -140,13 +149,14 @@ export class StravaService {
         })
       ]);
 
-      if (!athleteRes.ok || !activitiesRes.ok) throw new Error("Erreur API Strava");
+      if (!athleteRes.ok || !activitiesRes.ok) throw new Error("Accès API Strava refusé");
 
       const athlete = await athleteRes.json();
       const activities: StravaActivity[] = await activitiesRes.json();
       
+      // Filtrage et calcul de la VAM selon la formule : (gain / temps) * 3600
       const verticalActivities = activities
-        .filter(a => a.total_elevation_gain > 20 && a.moving_time > 60)
+        .filter(a => a.total_elevation_gain > 50 && a.moving_time > 120)
         .map(a => ({
           name: a.name,
           elevation: Math.round(a.total_elevation_gain),
@@ -156,26 +166,28 @@ export class StravaService {
 
       if (verticalActivities.length === 0) {
         return {
-          weight: athlete.weight || 70.0,
-          vo2max: 50,
-          vam4min: 400,
-          sourceActivity: "Aucune activité verticale trouvée",
+          weight: athlete.weight || 65.0,
+          vo2max: 45,
+          vam4min: 500,
+          sourceActivity: "Pas de sortie montagne détectée",
           recentActivities: []
         };
       }
 
+      // On prend les 2 plus récentes pour l'affichage
       const recent = verticalActivities.slice(0, 2);
+      // On prend la meilleure VAM du lot comme référence VAM 4min
       const bestVam = Math.max(...verticalActivities.map(v => v.vam));
       
       return {
-        weight: athlete.weight || 70.0, 
+        weight: athlete.weight || 65.0, 
         vo2max: this.estimateVo2Max(bestVam),
         vam4min: bestVam,
         sourceActivity: recent[0].name,
         recentActivities: recent
       };
     } catch (error: any) {
-      console.error("Strava Data Fetch Error:", error);
+      console.error("Erreur de récupération Strava:", error);
       throw error;
     }
   }
